@@ -67,9 +67,45 @@ def clean_name(restaurant_name):
     return f"{cleaned}"
 
 def extract_emails(text):
-    """Extract and return email addresses from text."""
-    pattern = r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b'
-    return set(re.findall(pattern, text))
+    """Extract and return a set of cleaned email addresses from text."""
+    # Match a larger candidate email substring
+    pattern = r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
+    raw_emails = re.findall(pattern, text)
+
+    cleaned_emails = set()
+    for email in raw_emails:
+        # Post-processing step:
+        # Locate '@' and isolate a valid email substring from there
+        at_index = email.find('@')
+        if at_index == -1:
+            continue
+
+        local_part = email[:at_index]
+        domain_part = email[at_index+1:]
+        
+        # Trim local_part: must contain only allowed chars
+        # Allowed in local: A-Za-z0-9._%+-
+        left_match = re.search(r'[A-Za-z0-9._%+\-]+$', local_part)
+        if left_match:
+            local_part = left_match.group(0)
+        else:
+            # If no match, skip this email
+            continue
+        
+        # Trim domain_part: must contain only allowed chars
+        # Allowed in domain: A-Za-z0-9.\- 
+        right_match = re.match(r'^[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', domain_part)
+        if right_match:
+            domain_part = right_match.group(0)
+        else:
+            # If domain isn't valid, skip this email
+            continue
+        
+        cleaned_email = local_part + '@' + domain_part
+        cleaned_emails.add(cleaned_email)
+
+    return cleaned_emails
+
 
 def detect_reservation_platform(html_content):
     """Detect the reservation platform from the given HTML content."""
