@@ -82,7 +82,7 @@ def detect_reservation_platform(html_content):
     return ""
 
 def scrape_emails_and_pos_from_website(start_url, max_links=10):
-    """Scrape emails, POS system, loyalty programs, and reservation platform from given website and up to 10 pages on the same domain."""
+    """Scrape emails, POS system, loyalty programs, and reservation platform from a given website and up to 10 pages on the same domain."""
     emails_found = set()
     pos_system = ""
     loyalty_programs = []
@@ -107,7 +107,19 @@ def scrape_emails_and_pos_from_website(start_url, max_links=10):
             html_content = soup.prettify()
 
             # Extract emails
-            emails_found.update(extract_emails(text))
+            new_emails = extract_emails(text)
+            cleaned_emails = set()
+            for email in new_emails:
+                if '@' in email and '.com' in email:
+                    # Cut off everything after '.com'
+                    idx = email.find('.com')
+                    # Include the '.com' in final email
+                    cleaned_email = email[:idx+4]
+                    cleaned_emails.add(cleaned_email)
+                else:
+                    cleaned_emails.add(email)
+            
+            emails_found.update(cleaned_emails)
 
             # Check for POS systems and loyalty programs
             if "www.toasttab.com" in html_content and pos_system != "Toast":
