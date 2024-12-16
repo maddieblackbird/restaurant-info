@@ -4,6 +4,7 @@ import re
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 import os
+import re
 
 API_KEY = os.environ.get("GOOGLE_API_KEY")  # Replace with your actual API key
 OUTPUT_FILE = "categorized_restaurants_with_details.csv"  # Output CSV file
@@ -67,41 +68,72 @@ def clean_name(restaurant_name):
     return f"{cleaned}"
 
 def extract_emails(text):
-    """Extract and return a set of cleaned email addresses from text."""
-    # Match a larger candidate email substring
-    pattern = r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
-    raw_emails = re.findall(pattern, text)
+    # This pattern finds occurrences of '@' followed by a domain
+    domain_pattern = r'@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
+    matches = list(re.finditer(domain_pattern, text))
 
     cleaned_emails = set()
-    for email in raw_emails:
-        # Post-processing step:
-        # Locate '@' and isolate a valid email substring from there
-        at_index = email.find('@')
-        if at_index == -1:
+    # Common keywords that likely represent the actual local part
+    known_usernames = ["info", "contact", "reservations", "sales", "support", "admin"]
+
+    # Characters allowed in local parts (per RFC) are quite broad, but let's keep digits and dots.
+    allowed_chars = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-")
+
+    for m in matches:
+        domain_str = m.group(0)  # includes '@'
+        domain = domain_str[1:]  # remove '@' to get domain
+
+        # Validate domain
+        if not re.match(r'^[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', domain):
             continue
 
-        local_part = email[:at_index]
-        domain_part = email[at_index+1:]
-        
-        # Trim local_part: must contain only allowed chars
-        # Allowed in local: A-Za-z0-9._%+-
-        left_match = re.search(r'[A-Za-z0-9._%+\-]+$', local_part)
-        if left_match:
-            local_part = left_match.group(0)
-        else:
-            # If no match, skip this email
+        start_idx = m.start()
+        # We'll move backwards from start_idx - 1 to find local part
+        pos = start_idx - 1
+        local_chars = []
+
+        # Move backward until we hit a character not allowed in a normal email local part
+        # However, just allowed_chars isn't enough since large numeric strings or "CONTACT" might appear.
+        # We'll collect allowed chars but then apply a heuristic to clean it.
+        while pos >= 0 and text[pos] in allowed_chars:
+            local_chars.append(text[pos])
+            pos -= 1
+
+        if not local_chars:
             continue
-        
-        # Trim domain_part: must contain only allowed chars
-        # Allowed in domain: A-Za-z0-9.\- 
-        right_match = re.match(r'^[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', domain_part)
-        if right_match:
-            domain_part = right_match.group(0)
-        else:
-            # If domain isn't valid, skip this email
+
+        # Reverse to get the correct order
+        local_part = "".join(reversed(local_chars))
+
+        # Heuristic cleanup:
+        # 1. Remove leading numeric/junk sequences until we find a more "realistic" username part
+        # Try to find a known username at the end of the local_part
+        found_username = False
+        l_lower = local_part.lower()
+        for uname in known_usernames:
+            if l_lower.endswith(uname):
+                # Extract the substring starting from that username
+                idx = l_lower.rfind(uname)
+                local_part = local_part[idx:]
+                found_username = True
+                break
+
+        if not found_username:
+            # If no known username found, try to guess by taking the last alphabetical stretch
+            alpha_matches = re.findall(r'[A-Za-z]+', local_part)
+            if alpha_matches:
+                last_alpha = alpha_matches[-1]
+                # Find where it occurs and take from there
+                pos = local_part.lower().rfind(last_alpha.lower())
+                local_part = local_part[pos:]
+
+        # Remove any leading non-alphanumeric chars again after trimming
+        local_part = re.sub(r'^[^A-Za-z0-9]+', '', local_part)
+        # If still empty or nonsense, skip
+        if not local_part:
             continue
-        
-        cleaned_email = local_part + '@' + domain_part
+
+        cleaned_email = local_part + '@' + domain
         cleaned_emails.add(cleaned_email)
 
     return cleaned_emails
