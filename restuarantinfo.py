@@ -97,11 +97,11 @@ def generate_intro_and_times(restaurant_name, reviews, popular_dish, opening_hou
         "Task:\n"
         "1) Write a short personal-sounding sentence or two for an intro to a prospecting email, referencing the popular dish and something positive (ambiance, staff, vibe, etc.) gleaned from the reviews. For example:\n"
         "   'I stopped in a couple weeks ago with my friends and we ordered the [dish] - it was so delicious, and the [ambiance/staff/vibe] was so [cozy/welcoming]. We had the best time!'\n\n"
-        "2) Based on the opening hours, suggest a day/time or two for our head of SF to drop in when the restaurant is likely not as busy (e.g. after lunch rush, or just before dinner, or any relevant quieter window).\n\n"
-        "Return your response in two paragraphs:\n"
-        "Paragraph #1 => The short intro blurb\n"
-        "Paragraph #2 => Propose two daes and times for that Michelle, our head of SF, can stop in.\n\n"
-        "No extra commentary.\n"
+        "2) Then, on a NEW line (Paragraph #2), produce EXACTLY one sentence in the format:\n"
+        "   \"Could Michelle, our lead in SF, stop by either [weekday 1] or [weekday 2] between [X time] to [Y time] this week / next? She lives in the neighborhood so it's super easy to pop in.\" \n"
+        "   - Avoid Saturday/Sunday.\n"
+        "   - Provide two weekday options.\n"
+        "   - No extra commentary or disclaimers.\n\n"
         f"{AI_PROMPT}"
     )
 
@@ -109,12 +109,12 @@ def generate_intro_and_times(restaurant_name, reviews, popular_dish, opening_hou
     try:
         response = anthropic_client.completions.create(
             prompt=prompt,
-            max_tokens_to_sample=300,
+            max_tokens_to_sample=300,               
             model="claude-2"
         )
-        completion = response.completion.strip()
+        completion = response.completion.strip()                                                                        
 
-        if "\n\n" in completion:
+        if "\n\n" in completion:                                                                                                        
             intro, times = completion.split("\n\n", 1)
             return (intro.strip(), times.strip())
         else:
