@@ -6,7 +6,15 @@ from bs4 import BeautifulSoup
 import os
 import re
 
-API_KEY = os.environ.get("GOOGLE_API_KEY")  # Replace with your actual API key
+# Anthropic / Claude
+from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
+from anthropic import InternalServerError
+
+# -------------------------------------------------------------------
+# CONFIG
+# -------------------------------------------------------------------
+API_KEY = os.environ.get("MAPS_API_KEY")        # Replace with your actual Google Maps API key
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # Claude API key (if available)
 OUTPUT_FILE = "categorized_restaurants_with_details.csv"  # Output CSV file
 
 FIND_PLACE_URL = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json"
@@ -15,46 +23,190 @@ PLACE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 # Create a session for performance and reusability
 session = requests.Session()
 
+# -------------------------------------------------------------------
+# AI HELPER
+# -------------------------------------------------------------------
+def find_popular_dish(restaurant_name, reviews):
+    """
+    Use Anthropic to identify a popular dish/drink mentioned in the reviews.
+    Returns a single dish/drink string.
+
+    If ANTHROPIC_API_KEY is missing, returns a placeholder.
+    """
+    if not ANTHROPIC_API_KEY:
+        return "[Missing Anthropic Key]"
+
+    # Combine up to 5 reviews for context.
+    relevant_reviews = "\n\n".join(r.get("text", "") for r in reviews[:5]).strip()
+
+    # Prompt: ask only for the top-mentioned dish or drink
+    prompt = (
+        f"{HUMAN_PROMPT}\n"
+        "Identify a single dish or drink that seems most popular or most-mentioned across the following reviews. "
+        "Return ONLY the name of that dish/drink (one line) with no extra words or commentary.\n\n"
+        f"Restaurant name: {restaurant_name}\n\n"
+        "Reviews:\n"
+        f"{relevant_reviews}\n\n"
+        f"{AI_PROMPT}"
+    )
+
+    anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        response = anthropic_client.completions.create(
+            prompt=prompt,
+            max_tokens_to_sample=300,
+            model="claude-2"
+        )
+        completion = response.completion.strip()
+        # We will just return the entire completion (should ideally be just the dish name)
+        return completion
+    except InternalServerError as e:
+        print(f"[DEBUG] Error calling Claude: {e}")
+        return "[AI Error]"
+
+def generate_intro_and_times(restaurant_name, reviews, popular_dish, opening_hours):
+    """
+    Generate a short "intro email blurb" referencing the popular dish and 
+    positive ambiance/staff/vibe from the reviews. Then suggest a couple 
+    of times to drop in when it's likely less busy, based on the restaurant's 
+    opening hours.
+
+    Returns (intro_blurb, suggested_times).
+    If ANTHROPIC_API_KEY is missing, returns placeholder text.
+    """
+    if not ANTHROPIC_API_KEY:
+        return ("[Missing Anthropic Key for Intro]", "[N/A]")
+
+    # Combine up to 5 reviews for context
+    relevant_reviews = "\n\n".join(r.get("text", "") for r in reviews[:5]).strip()
+    # If we have no opening hours, pass a placeholder
+    hours_text = "\n".join(opening_hours.get("weekday_text", [])) if opening_hours else "[No hours data]"
+
+    # We'll ask Claude to produce EXACTLY two paragraphs:
+    # Paragraph #1: Intro blurb
+    # Paragraph #2: Suggested times
+    prompt = (
+        f"{HUMAN_PROMPT}\n"
+        "You are given:\n"
+        f"- Restaurant name: {restaurant_name}\n"
+        f"- A 'popular dish': {popular_dish}\n"
+        " - Up to 5 recent reviews (for vibe, ambiance, staff, etc.):\n"
+        f"{relevant_reviews}\n\n"
+        " - Opening hours:\n"
+        f"{hours_text}\n\n"
+        "Task:\n"
+        "1) Write a short personal-sounding sentence or two for an intro to a prospecting email, referencing the popular dish and something positive (ambiance, staff, vibe, etc.) gleaned from the reviews. For example:\n"
+        "   'I stopped in a couple weeks ago with my partner and we ordered the [dish] - it was so delicious, and the [ambiance/staff/vibe] was so [cozy/welcoming]. We had the best time!'\n\n"
+        "2) Based on the opening hours, suggest a day/time or two for our head of SF to drop in when the restaurant is likely not as busy (e.g. after lunch rush, or just before dinner, or any relevant quieter window).\n\n"
+        "Return your response in two paragraphs:\n"
+        "Paragraph #1 => The short intro blurb\n"
+        "Paragraph #2 => One or two suggested quieter times to drop in.\n\n"
+        "No extra commentary.\n"
+        f"{AI_PROMPT}"
+    )
+
+    anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        response = anthropic_client.completions.create(
+            prompt=prompt,
+            max_tokens_to_sample=300,
+            model="claude-2"
+        )
+        completion = response.completion.strip()
+
+        if "\n\n" in completion:
+            intro, times = completion.split("\n\n", 1)
+            return (intro.strip(), times.strip())
+        else:
+            # If we can’t split, treat everything as intro only
+            return (completion, "[Could not parse times]")
+    except InternalServerError as e:
+        print(f"[DEBUG] Error calling Claude for intro & times: {e}")
+        return ("[AI Error]", "[N/A]")
+
+# -------------------------------------------------------------------
+# ORIGINAL FUNCTIONS (minus poem references)
+# -------------------------------------------------------------------
 def find_place_id(restaurant_name, api_key):
+    print(f"\n[DEBUG] Attempting to find place ID for: '{restaurant_name}'")
+    print(f"[DEBUG] API key in find_place_id is: {api_key}")
+
     params = {
         "input": restaurant_name,
         "inputtype": "textquery",
         "fields": "place_id",
         "key": api_key,
-        "locationbias": "circle:20000@37.7749,-122.4194"
+        # SF location bias
+        # "locationbias": "circle:20000@37.7749,-122.4194"
+        # NYC location bias
+        "locationbias": "circle:20000@40.7128,74.0060"
     }
+    print(f"[DEBUG] Params for FIND_PLACE_URL: {params}")
+
     try:
         response = session.get(FIND_PLACE_URL, params=params, timeout=10)
+        print(f"[DEBUG] Response status_code: {response.status_code}")
         if response.status_code == 200:
+            print(f"[DEBUG] Raw JSON from find_place_id:\n{response.text}\n")
             result = response.json().get("candidates", [])
             if result:
+                print(f"[DEBUG] Found place_id: {result[0].get('place_id')}")
                 return result[0].get("place_id")
+            else:
+                print("[DEBUG] No candidates returned in the JSON.")
+        else:
+            print(f"[DEBUG] Non-200 status code returned: {response.status_code}")
+
     except requests.exceptions.RequestException as e:
-        print(f"Error finding place ID for {restaurant_name}: {e}")
+        print(f"[DEBUG] Error finding place ID for {restaurant_name}: {e}")
     return None
 
 def get_place_details(place_id, api_key):
-    """Get detailed information for a given Place ID."""
+    print(f"\n[DEBUG] Getting details for Place ID: '{place_id}'")
+    print(f"[DEBUG] API key in get_place_details is: {api_key}")
+
     params = {
         "place_id": place_id,
-        "fields": "name,formatted_address,price_level,types,website,formatted_phone_number,rating,user_ratings_total,opening_hours",
+        "fields": "name,formatted_address,price_level,types,website,formatted_phone_number,"
+                  "rating,user_ratings_total,opening_hours,reviews",
         "key": api_key
     }
+    print(f"[DEBUG] Params for PLACE_DETAILS_URL: {params}")
+
     try:
         response = session.get(PLACE_DETAILS_URL, params=params, timeout=10)
+        print(f"[DEBUG] Response status_code: {response.status_code}")
         if response.status_code == 200:
-            return response.json().get("result", {})
+            print(f"[DEBUG] Raw JSON from get_place_details:\n{response.text}\n")
+            result = response.json().get("result", {})
+
+            # Find "most_relevant_review" by highest rating
+            reviews = result.get("reviews", [])
+            if reviews:
+                top_review = sorted(reviews, key=lambda x: x.get("rating", 0), reverse=True)[0]
+                result["most_relevant_review"] = {
+                    "author_name": top_review.get("author_name"),
+                    "text": top_review.get("text"),
+                    "rating": top_review.get("rating"),
+                }
+            else:
+                result["most_relevant_review"] = None
+
+            return result
+        else:
+            print(f"[DEBUG] Non-200 status code returned: {response.status_code}")
+
     except requests.exceptions.RequestException as e:
-        print(f"Error getting details for place ID {place_id}: {e}")
+        print(f"[DEBUG] Error getting details for Place ID {place_id}: {e}")
     return {}
 
 def classify_service_type(types):
-    """Classify the service type based on 'types'."""
+    print(f"[DEBUG] Classifying service type for types={types}")
     types = [t.lower() for t in types]
     if "restaurant" in types and "bar" not in types and "fast_food" not in types:
-        return "BB1"  # Full service restaurant
+        return "BB1"  # Full service
     elif "fast_food" in types or "meal_takeaway" in types or "meal_delivery" in types:
-        return "BB2"  # Quick service restaurant
+        return "BB2"  # Quick service
     elif "bar" in types:
         return "BB3"  # Bar
     elif any(keyword in types for keyword in ["cafe", "bakery", "food", "drink"]):
@@ -63,38 +215,26 @@ def classify_service_type(types):
         return "Not a restaurant"
 
 def clean_name(restaurant_name):
-    # Instead of removing 'greater NYC area', explicitly add 'in San Francisco'
-    cleaned = restaurant_name.replace("greater NYC area", "").strip()
+    cleaned = restaurant_name.replace("greater SF area", "").strip()
     return f"{cleaned}"
 
 def extract_emails(text):
-    # This pattern finds occurrences of '@' followed by a domain
     domain_pattern = r'@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
     matches = list(re.finditer(domain_pattern, text))
 
     cleaned_emails = set()
-    # Common keywords that likely represent the actual local part
     known_usernames = ["info", "contact", "reservations", "sales", "support", "admin"]
-
-    # Characters allowed in local parts (per RFC) are quite broad, but let's keep digits and dots.
     allowed_chars = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-")
 
     for m in matches:
         domain_str = m.group(0)  # includes '@'
-        domain = domain_str[1:]  # remove '@' to get domain
-
-        # Validate domain
+        domain = domain_str[1:]  # remove '@'
         if not re.match(r'^[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', domain):
             continue
 
         start_idx = m.start()
-        # We'll move backwards from start_idx - 1 to find local part
         pos = start_idx - 1
         local_chars = []
-
-        # Move backward until we hit a character not allowed in a normal email local part
-        # However, just allowed_chars isn't enough since large numeric strings or "CONTACT" might appear.
-        # We'll collect allowed chars but then apply a heuristic to clean it.
         while pos >= 0 and text[pos] in allowed_chars:
             local_chars.append(text[pos])
             pos -= 1
@@ -102,34 +242,25 @@ def extract_emails(text):
         if not local_chars:
             continue
 
-        # Reverse to get the correct order
         local_part = "".join(reversed(local_chars))
 
-        # Heuristic cleanup:
-        # 1. Remove leading numeric/junk sequences until we find a more "realistic" username part
-        # Try to find a known username at the end of the local_part
         found_username = False
         l_lower = local_part.lower()
         for uname in known_usernames:
             if l_lower.endswith(uname):
-                # Extract the substring starting from that username
                 idx = l_lower.rfind(uname)
                 local_part = local_part[idx:]
                 found_username = True
                 break
 
         if not found_username:
-            # If no known username found, try to guess by taking the last alphabetical stretch
             alpha_matches = re.findall(r'[A-Za-z]+', local_part)
             if alpha_matches:
                 last_alpha = alpha_matches[-1]
-                # Find where it occurs and take from there
                 pos = local_part.lower().rfind(last_alpha.lower())
                 local_part = local_part[pos:]
 
-        # Remove any leading non-alphanumeric chars again after trimming
         local_part = re.sub(r'^[^A-Za-z0-9]+', '', local_part)
-        # If still empty or nonsense, skip
         if not local_part:
             continue
 
@@ -138,10 +269,11 @@ def extract_emails(text):
 
     return cleaned_emails
 
-
 def detect_reservation_platform(html_content):
-    """Detect the reservation platform from the given HTML content."""
-    if 'id="resy_button_container"' in html_content or "widgets.resy.com" in html_content or "resy.com" in html_content or "Resy" in html_content:
+    if ('id="resy_button_container"' in html_content or 
+        "widgets.resy.com" in html_content or 
+        "resy.com" in html_content or 
+        "Resy" in html_content):
         return "Resy"
     if "OpenTable" in html_content or "opentable.com" in html_content:
         return "OpenTable"
@@ -150,7 +282,7 @@ def detect_reservation_platform(html_content):
     return ""
 
 def scrape_emails_and_pos_from_website(start_url, max_links=10):
-    """Scrape emails, POS system, loyalty programs, and reservation platform from a given website and up to 10 pages on the same domain."""
+    print(f"[DEBUG] Starting website scrape from: {start_url}")
     emails_found = set()
     pos_system = ""
     loyalty_programs = []
@@ -166,7 +298,8 @@ def scrape_emails_and_pos_from_website(start_url, max_links=10):
         if url in visited:
             continue
         visited.add(url)
-        
+
+        print(f"[DEBUG] Scraping URL: {url}")
         try:
             response = session.get(url, timeout=10)
             response.raise_for_status()
@@ -179,17 +312,15 @@ def scrape_emails_and_pos_from_website(start_url, max_links=10):
             cleaned_emails = set()
             for email in new_emails:
                 if '@' in email and '.com' in email:
-                    # Cut off everything after '.com'
                     idx = email.find('.com')
-                    # Include the '.com' in final email
                     cleaned_email = email[:idx+4]
                     cleaned_emails.add(cleaned_email)
                 else:
                     cleaned_emails.add(email)
-            
+
             emails_found.update(cleaned_emails)
 
-            # Check for POS systems and loyalty programs
+            # Check for POS/loyalty references
             if "www.toasttab.com" in html_content and pos_system != "Toast":
                 pos_system = "Toast"
             if "inkindscript.com" in html_content and "inKind" not in loyalty_programs:
@@ -197,24 +328,26 @@ def scrape_emails_and_pos_from_website(start_url, max_links=10):
             if "spoton.com" in html_content and "SpotOn" not in loyalty_programs:
                 loyalty_programs.append("SpotOn")
 
-            # Detect reservation platform more thoroughly
             if not reservation_platform:
                 platform = detect_reservation_platform(html_content)
                 if platform:
                     reservation_platform = platform
 
-            # Gather links from this page
+            # Gather more links
             priority_links = []
             normal_links = []
             for link in soup.find_all('a', href=True):
                 absolute_link = urljoin(url, link['href'])
                 parsed_link = urlparse(absolute_link)
 
-                # Only follow links within the same domain
                 if parsed_link.netloc == base_domain:
+                    # Skip big filetypes
+                    if parsed_link.path.endswith((".pdf", ".jpg", ".png")):
+                        continue
+
                     link_text = link.get_text().lower()
                     link_url = absolute_link.lower()
-                    if any(keyword in link_text or keyword in link_url for keyword in ["reservation", "book", "resy", "opentable", "tock"]):
+                    if any(k in link_text or k in link_url for k in ["reservation", "book", "resy", "opentable", "tock"]):
                         priority_links.append(absolute_link)
                     else:
                         normal_links.append(absolute_link)
@@ -230,91 +363,100 @@ def scrape_emails_and_pos_from_website(start_url, max_links=10):
                     to_scrape.append(nl)
 
             links_scraped += 1
-
         except requests.exceptions.RequestException as e:
-            print(f"Error scraping {url}: {e}")
+            print(f"[DEBUG] Error scraping {url}: {e}")
             continue
 
-    # Remove duplicates from loyalty_programs
     loyalty_programs = list(set(loyalty_programs))
-
+    print(f"[DEBUG] Finished scraping. Found emails: {emails_found}, POS: {pos_system}, Loyalty: {loyalty_programs}, Reservation: {reservation_platform}")
     return emails_found, pos_system, '; '.join(loyalty_programs), reservation_platform
 
+# -------------------------------------------------------------------
+# MAIN
+# -------------------------------------------------------------------
 def main(input_file):
-    # Load the CSV file
-    print(f"Loading input file: {input_file}")
+    print(f"[DEBUG] Loading input file: {input_file}")
     df = pd.read_csv(input_file)
-    print(f"Number of rows in input file: {len(df)}")
-    print(f"Columns: {df.columns.tolist()}")
+    print(f"[DEBUG] Number of rows in input file: {len(df)}")
+    print(f"[DEBUG] Columns: {df.columns.tolist()}")
 
     if "whole name" not in df.columns:
-        print("Error: 'whole name' column not found in the input CSV.")
+        print("[DEBUG] Error: 'whole name' column not found.")
         return
 
     if df.empty:
-        print("The input CSV is empty. No restaurants to process.")
+        print("[DEBUG] The input CSV is empty. No restaurants to process.")
         return
 
-    # Prepare output data
     detailed_data = []
-    
-    # Try loading partial progress if exists
     try:
         existing_df = pd.read_csv(OUTPUT_FILE)
         processed_names = set(existing_df["whole name"].unique())
         detailed_data = existing_df.to_dict('records')
-        print(f"Loaded existing progress with {len(existing_df)} records.")
+        print(f"[DEBUG] Loaded existing progress with {len(existing_df)} records.")
     except FileNotFoundError:
         processed_names = set()
 
-    # Process each restaurant
     for index, row in df.iterrows():
         restaurant_name = clean_name(row["whole name"])
-
         if restaurant_name in processed_names:
-            # Already processed
+            print(f"[DEBUG] Already processed {restaurant_name}, skipping.")
             continue
 
-        print(f"Processing: {restaurant_name}")
+        print(f"\n[DEBUG] Processing: {restaurant_name}")
 
         # Step 1: Find Place ID
         place_id = find_place_id(restaurant_name, API_KEY)
         if not place_id:
-            print(f"Place ID not found for: {restaurant_name}")
+            print(f"[DEBUG] No Place ID found for {restaurant_name}. Saving progress and continuing.")
             pd.DataFrame(detailed_data).to_csv(OUTPUT_FILE, index=False)
             continue
-
-        print(f"Found place ID for {restaurant_name}: {place_id}")
 
         # Step 2: Get Place Details
         details = get_place_details(place_id, API_KEY)
         if not details:
-            print(f"Details not found for Place ID: {place_id} ({restaurant_name})")
+            print(f"[DEBUG] No details found for Place ID {place_id} ({restaurant_name}). Saving progress and continuing.")
             pd.DataFrame(detailed_data).to_csv(OUTPUT_FILE, index=False)
             continue
 
-        print(f"Got details for {restaurant_name}: {details.get('name')}")
+        # Log
+        print(f"[DEBUG] Google returned name: {details.get('name')}")
+        print(f"[DEBUG] Google returned website: {details.get('website')}")
 
         # Step 3: Classify Service Type
         service_type = classify_service_type(details.get("types", []))
 
-        # Extract website
-        website = details.get("website")
-        if website:
-            print(f"Scraping website for {restaurant_name}: {website}")
-        else:
-            print(f"No website found for {restaurant_name}.")
+        # Step 4: Extract the "most relevant" review
+        review = details.get("most_relevant_review", {})
+        review_text = review.get("text", "") if review else "No reviews available"
+        review_author = review.get("author_name", "") if review else "N/A"
+        review_rating = review.get("rating", "") if review else "N/A"
 
-        # Scrape emails if a website is available
+        # Step 5: Collect all reviews for AI
+        all_reviews = details.get("reviews", [])
+
+        # Generate the popular dish only (no poem)
+        popular_dish = find_popular_dish(restaurant_name, all_reviews)
+
+        # Generate intro + suggested times
+        intro_blurb, suggested_times = generate_intro_and_times(
+            restaurant_name,
+            all_reviews,
+            popular_dish,
+            details.get("opening_hours")
+        )
+
+        # Step 6: Optional website scraping
+        website = details.get("website")
         if website:
             emails, pos_system, loyalty_programs, reservation_platform = scrape_emails_and_pos_from_website(website, max_links=10)
         else:
             emails, pos_system, loyalty_programs, reservation_platform = set(), "", "", ""
 
-        # If no emails found, create an empty entry
         if not emails:
             emails = [""]
 
+        # Step 7: Append everything
         for email in emails:
             entry = {
                 "whole name": row["whole name"],
@@ -331,16 +473,24 @@ def main(input_file):
                 "Email": email,
                 "POS System": pos_system,
                 "Loyalty Programs": loyalty_programs,
-                "Reservation Platform": reservation_platform
+                "Reservation Platform": reservation_platform,
+                # Existing review columns
+                "Review Text": review_text,
+                "Review Author": review_author,
+                "Review Rating": review_rating,
+                # NEW columns
+                "Popular Dish/Drink": popular_dish,
+                "Intro Email Blurb": intro_blurb,
+                "Suggested Times": suggested_times
             }
             detailed_data.append(entry)
 
-        # Update processed_names and save partial progress
         processed_names.add(restaurant_name)
         pd.DataFrame(detailed_data).to_csv(OUTPUT_FILE, index=False)
-        print(f"Progress saved after processing {restaurant_name}.")
+        print(f"[DEBUG] Progress saved after processing {restaurant_name}.")
 
-    print(f"Data saved to {OUTPUT_FILE}")
+    print(f"[DEBUG] All done. Data saved to {OUTPUT_FILE}.")
+
 
 if __name__ == "__main__":
     input_file = "input.csv"  # Replace 'input.csv' with your actual input file name
