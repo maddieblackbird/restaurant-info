@@ -69,7 +69,7 @@ def generate_intro_and_times(restaurant_name, reviews, popular_dish, opening_hou
     Generate a short "intro email blurb" referencing the popular dish and 
     positive ambiance/staff/vibe from the reviews. Then suggest a couple 
     of times to drop in when it's likely less busy, based on the restaurant's 
-    opening hours.
+    opening hours. Phase this something like "Could Michelle, our head of SF, stop by at [day and time] or [day and time option2], I assume you may be slightly less busy then?"
 
     Returns (intro_blurb, suggested_times).
     If ANTHROPIC_API_KEY is missing, returns placeholder text.
@@ -96,11 +96,11 @@ def generate_intro_and_times(restaurant_name, reviews, popular_dish, opening_hou
         f"{hours_text}\n\n"
         "Task:\n"
         "1) Write a short personal-sounding sentence or two for an intro to a prospecting email, referencing the popular dish and something positive (ambiance, staff, vibe, etc.) gleaned from the reviews. For example:\n"
-        "   'I stopped in a couple weeks ago with my partner and we ordered the [dish] - it was so delicious, and the [ambiance/staff/vibe] was so [cozy/welcoming]. We had the best time!'\n\n"
+        "   'I stopped in a couple weeks ago with my friends and we ordered the [dish] - it was so delicious, and the [ambiance/staff/vibe] was so [cozy/welcoming]. We had the best time!'\n\n"
         "2) Based on the opening hours, suggest a day/time or two for our head of SF to drop in when the restaurant is likely not as busy (e.g. after lunch rush, or just before dinner, or any relevant quieter window).\n\n"
         "Return your response in two paragraphs:\n"
         "Paragraph #1 => The short intro blurb\n"
-        "Paragraph #2 => One or two suggested quieter times to drop in.\n\n"
+        "Paragraph #2 => Propose two daes and times for that Michelle, our head of SF, can stop in.\n\n"
         "No extra commentary.\n"
         f"{AI_PROMPT}"
     )
@@ -137,9 +137,9 @@ def find_place_id(restaurant_name, api_key):
         "fields": "place_id",
         "key": api_key,
         # SF location bias
-        # "locationbias": "circle:20000@37.7749,-122.4194"
+        "locationbias": "circle:20000@37.7749,-122.4194"
         # NYC location bias
-        "locationbias": "circle:20000@40.7128,74.0060"
+        # "locationbias": "circle:20000@40.7128,74.0060"
     }
     print(f"[DEBUG] Params for FIND_PLACE_URL: {params}")
 
